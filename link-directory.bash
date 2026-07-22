@@ -92,3 +92,7 @@ else
     # Nothing there, or a stale symlink pointing elsewhere.
     ln -sf "$target" "$mountPoint"
 fi
+
+if [[ -L $mountPoint ]]; then
+    chown -h "$user:$group" "$mountPoint"
+fi
