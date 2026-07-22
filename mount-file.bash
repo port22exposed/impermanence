@@ -29,6 +29,15 @@ if (( debug )); then
     set -o xtrace
 fi
 
+# /etc/machine-id can't be a symlink: systemd-machine-id-commit wants to
+# mount over it, which fails on a symlink. It's also written exactly once,
+# so a bind mount costs no extra writes. Force a bind mount regardless of
+# the requested method. For more details, see
+# https://github.com/nix-community/impermanence/pull/242
+if [[ $mountPoint == "/etc/machine-id" ]]; then
+    method="bindmount"
+fi
+
 if [[ -L $mountPoint && $(readlink -f "$mountPoint") == "$targetFile" ]]; then
     trace "$mountPoint already links to $targetFile, ignoring"
 elif findmnt "$mountPoint" >/dev/null; then
@@ -36,16 +45,16 @@ elif findmnt "$mountPoint" >/dev/null; then
 elif [[ -s $mountPoint ]]; then
     echo "A file already exists at $mountPoint!" >&2
     exit 1
-elif [[ $method == "auto" && -e $targetFile ]]; then
-    touch "$mountPoint"
-    mount -o bind "$targetFile" "$mountPoint"
-elif [[ $method == "auto" && $mountPoint == "/etc/machine-id" ]]; then
-    # Work around an issue with persisting /etc/machine-id. For more
-    # details, see https://github.com/nix-community/impermanence/pull/242
-    echo "Creating initial /etc/machine-id"
-    echo "uninitialized" > "$targetFile"
+elif [[ $method == "bindmount" || ($method == "auto" && -e $targetFile) ]]; then
+    if [[ $mountPoint == "/etc/machine-id" && ! -e $targetFile ]]; then
+        echo "Creating initial /etc/machine-id"
+        echo "uninitialized" > "$targetFile"
+    fi
     touch "$mountPoint"
     mount -o bind "$targetFile" "$mountPoint"
 else
-    ln -s "$targetFile" "$mountPoint"
+    # A stale symlink (e.g. pointing somewhere else) would make `ln -s`
+    # fail, so replace it. We only get here when nothing meaningful lives
+    # at the mount point (the `-s` check above rejects real files).
+    ln -sf "$targetFile" "$mountPoint"
 fi

@@ -21,7 +21,7 @@
     want to keep are stored permanently.
 
   - At least one of the modules in this repository, which take care of
-    linking or bind mounting files between the persistent storage
+    symlinking files and directories between the persistent storage
     mount point and the root file system. See the [[#module-usage][Module usage]] section
     for more info.
 
@@ -262,25 +262,28 @@
         be enabled or not. Useful when sharing configurations between
         systems with and without impermanence setups. Defaults to ~true~.
 
-      - ~hideMounts~ allows you to specify whether to hide the
-        bind mounts from showing up as mounted drives in the file
-        manager. If enabled, it sets the mount option ~x-gvfs-hide~
-        on all the bind mounts.
+      - ~hideMounts~ used to hide the bind mounts from showing up as
+        mounted drives in the file manager. It has no effect now that
+        directories are symlinked rather than bind mounted (symlinks
+        don't show up as mounted drives), and is kept only for
+        backwards compatibility.
 
-      - ~allowTrash~ allows you to specify whether to allow apps that
-        use certain GTK-based technologies such as GIO to put items in
-        the trash. If enabled, it sets the mount option ~x-gvfs-trash~
-        on all the bind mounts.
+      - ~allowTrash~ used to allow apps that use certain GTK-based
+        technologies such as GIO to put items in the trash. It has no
+        effect now that directories are symlinked rather than bind
+        mounted (a symlinked directory shares a filesystem with its
+        trash location, so trashing already works), and is kept only
+        for backwards compatibility.
 
 ****** ~directories~
 
-       All directories you want to bind mount to persistent storage. A
+       All directories you want to symlink to persistent storage. A
        directory can be represented either as a string, simply denoting its
        path, or as a submodule. The submodule representation is useful when
        the default assumptions, mainly regarding permissions, are
        incorrect. The available options are:
 
-       - ~directory~, the path to the directory you want to bind mount to
+       - ~directory~, the path to the directory you want to symlink to
          persistent storage. Only setting this option is equivalent to
          the string representation.
 
@@ -312,14 +315,14 @@
 
 ****** ~files~
 
-       All files you want to link or bind to persistent storage. A
+       All files you want to link to persistent storage. A
        file can be represented either as a string, simply denoting its
        path, or as a submodule. The submodule representation is useful
        when the default assumptions, mainly regarding the permissions
        of its parent directory, are incorrect. The available options
        are:
 
-       - ~file~, the path to the file you want to bind mount to
+       - ~file~, the path to the file you want to symlink to
          persistent storage. Only setting this option is equivalent to
          the string representation.
 
@@ -335,10 +338,14 @@
          definition in ~directories~ above.
 
        - ~method~, the method used to link the file to persistent
-         storage. ~"auto"~, the default, uses a bind mount when the file
-         exists in persistent storage and a symlink
-         otherwise. ~"symlink"~ uses a symlink regardless. Only change
-         this to ~"symlink"~ if ~"auto"~ is giving you issues.
+         storage. ~"symlink"~, the default, points a symlink at the file
+         in persistent storage. This avoids the cross-device copies a
+         bind mount forces when a program renames a file into place.
+         ~"auto"~ uses a bind mount when the file exists in persistent
+         storage and a symlink otherwise; only use it if ~"symlink"~ is
+         giving you issues. Note that ~/etc/machine-id~ is always bind
+         mounted regardless of this setting, as symlinking it breaks
+         ~systemd-machine-id-commit~.
 
 ****** ~users.bird~
 
@@ -431,13 +438,13 @@
 
 ****** ~directories~
 
-       All directories you want to bind mount to persistent
+       All directories you want to symlink to persistent
        storage. See [[#directories][the NixOS module directories section]] for more
        details.
 
 ****** ~files~
 
-       All files you want to link or bind to persistent storage. See
+       All files you want to symlink to persistent storage. See
        [[#files][the NixOS module files section]] for more details.
 
 ** Further reading

@@ -68,6 +68,11 @@
 
                       boot.initrd.verbose = true;
 
+                      # Catch shellcheck issues (e.g. SC2174) in the scripts we
+                      # generate for systemd units, mirroring configs that turn
+                      # this on. A warning here fails the build.
+                      systemd.enableStrictShellChecks = true;
+
                       imports = [
                         self.nixosModule
                         configuration
@@ -158,7 +163,13 @@
                             dir.group;
                       in ''
                         persistence.wait_for_file("${targetDir}", 1)
-                        persistence.succeed("diff <(stat -c '%Hd %Ld %i' ${targetDir}) <(stat -c '%Hd %Ld %i' ${dir.dirPath})")
+                        # The directory itself must be a symlink into
+                        # persistent storage, not a bind mount.
+                        persistence.succeed("test -L ${dir.dirPath}")
+                        persistence.succeed("test ${targetDir} = $(readlink -f ${dir.dirPath})")
+                        # `stat -L` dereferences the symlink; it must resolve
+                        # to the very same directory in persistent storage.
+                        persistence.succeed("diff <(stat -c '%Hd %Ld %i' ${targetDir}) <(stat -L -c '%Hd %Ld %i' ${dir.dirPath})")
                         persistence.succeed("test ${dir.user} = $(stat -c %U ${targetDir})")
                         persistence.succeed("test ${group} = $(stat -c %G ${targetDir})")
                         persistence.succeed("test ${dir.mode} = $(stat -c %#01a ${targetDir})")
@@ -190,9 +201,12 @@
                         targetFile = self.lib.concatPaths [ file.persistentStoragePath file.filePath ];
                       in ''
                         persistence.wait_for_file("${targetFile}", 1)
-                        ${if file.method == "auto" then ''
+                        ${if file.filePath == "/etc/machine-id" || file.method == "auto" then ''
+                          # /etc/machine-id is always a bind mount, as is any
+                          # file with method = "auto" whose target exists.
                           persistence.succeed("diff <(stat -c '%Hd %Ld %i' ${targetFile}) <(stat -c '%Hd %Ld %i' ${file.filePath})")
                         '' else ''
+                          persistence.succeed("test -L ${file.filePath}")
                           persistence.succeed("test ${targetFile} = $(readlink -f ${file.filePath})")
                         ''}
                         persistence.succeed("diff ${targetFile} ${file.filePath}")

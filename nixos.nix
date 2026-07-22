@@ -2,6 +2,8 @@
 
 let
   inherit (lib)
+    hasPrefix
+    removePrefix
     attrNames
     attrValues
     mapAttrsToList
@@ -83,7 +85,32 @@ let
     in
     zipAttrsWith (_: flatten) (nixos ++ nixosUsers ++ homeManager);
 
-  inherit (allPersistentStoragePaths) files directories;
+    # A path is shadowed when it sits inside another persisted directory
+    # AND resolves into the same persistent subtree: the ancestor's
+    # symlink already makes the child appear exactly where its own link
+    # would point. Linking it anyway traverses the ancestor's symlink and
+    # plants a self-referential link inside persistent storage; running
+    # the child first on a fresh boot instead materialises the ancestor
+    # as a real ephemeral directory, failing its non-empty check. Nesting
+    # across *different* storage roots is deliberately kept: that link
+    # lands inside the ancestor's persistent copy but points at the other
+    # root, which persists and resolves fine.
+    shadowedBy = childPath: child: parent:
+      parent.dirPath != childPath
+      && hasPrefix "${parent.dirPath}/" childPath
+      && concatPaths [ child.persistentStoragePath childPath ]
+         == (concatPaths [ parent.persistentStoragePath parent.dirPath ]
+             + removePrefix parent.dirPath childPath);
+
+    directories =
+      filter
+        (d: !(any (shadowedBy d.dirPath d) allPersistentStoragePaths.directories))
+        allPersistentStoragePaths.directories;
+
+    files =
+      filter
+        (f: !(any (shadowedBy f.filePath f) directories))
+        allPersistentStoragePaths.files;
 
   mountFile = pkgs.runCommand "persistence-mount-file" { buildInputs = [ pkgs.bash ]; } ''
     cp ${./mount-file.bash} $out
@@ -103,6 +130,29 @@ let
     in
     ''
       ${mountFile} ${args}
+    '';
+
+  linkDirectory = pkgs.runCommand "persistence-link-directory" { buildInputs = [ pkgs.bash ]; } ''
+    cp ${./link-directory.bash} $out
+    patchShebangs $out
+  '';
+
+  mkPersistDir = { dirPath, persistentStoragePath, user, group, mode, enableDebugging, ... }:
+    let
+      mountPoint = dirPath;
+      targetDir = concatPaths [ persistentStoragePath dirPath ];
+      args = escapeShellArgs [
+        targetDir
+        mountPoint
+        user
+        # Home Manager doesn't seem to know about the user's group
+        (if group == null then users.${user}.group else group)
+        mode
+        enableDebugging
+      ];
+    in
+    ''
+      ${linkDirectory} ${args}
     '';
 
   defaultPerms = {
@@ -247,6 +297,7 @@ in
                       before = [ "local-fs.target" ];
                       path = [ pkgs.util-linux ];
                       unitConfig.DefaultDependencies = false;
+                      restartIfChanged = false;
                       serviceConfig = {
                         Type = "oneshot";
                         RemainAfterExit = true;
@@ -263,49 +314,95 @@ in
                       };
                     };
                   };
-              in
-              foldl' recursiveUpdate { } (map mkPersistFileService files);
 
-            boot.initrd.systemd.mounts =
+                mkPersistDirService = { dirPath, persistentStoragePath, ... }@args:
+                  let
+                    targetDir = concatPaths [ persistentStoragePath dirPath ];
+                    mountPoint = escapeShellArg dirPath;
+                  in
+                  {
+                    "persist-${escapeSystemdPath targetDir}" = {
+                      description = "Link ${targetDir} to ${mountPoint}";
+                      wantedBy = [ "local-fs.target" ];
+                      before = [ "local-fs.target" ];
+                      path = [ pkgs.util-linux ];
+                      unitConfig.DefaultDependencies = false;
+                      restartIfChanged = false;
+                      serviceConfig = {
+                        Type = "oneshot";
+                        RemainAfterExit = true;
+                        ExecStart = mkPersistDir args;
+                        # The directory is only ever a symlink now, but an
+                        # older generation may have left behind a bind mount.
+                        ExecStop = pkgs.writeShellScript "unlink-${escapeSystemdPath targetDir}" ''
+                          set -eu
+                          if [[ -L ${mountPoint} ]]; then
+                              rm ${mountPoint}
+                          elif findmnt ${mountPoint} >/dev/null; then
+                              umount ${mountPoint}
+                          fi
+                        '';
+                      };
+                    };
+                  };
+              in
+              foldl' recursiveUpdate { }
+                ((map mkPersistFileService files)
+                  ++ (map mkPersistDirService directories));
+
+            boot.initrd.systemd.services =
               let
-                mkBindMount = { dirPath, persistentStoragePath, hideMount, allowTrash, ... }: {
-                  wantedBy = [ "initrd.target" ];
-                  before = [ "initrd-nixos-activation.service" ];
-                  where = concatPaths [ "/sysroot" dirPath ];
-                  what = concatPaths [ "/sysroot" persistentStoragePath dirPath ];
-                  unitConfig.DefaultDependencies = false;
-                  type = "none";
-                  options = concatStringsSep "," ([
-                    "bind"
-                  ] ++ optionals hideMount [
-                    "x-gvfs-hide"
-                  ] ++ optionals allowTrash [
-                    "x-gvfs-trash"
-                  ]);
-                };
+                mkPersistDirInitrdService = { dirPath, persistentStoragePath, mode, ... }:
+                  let
+                    targetDir = concatPaths [ persistentStoragePath dirPath ];
+                    # In the initrd the ephemeral root and persistent storage
+                    # live under /sysroot, but the symlink has to resolve
+                    # after the switch_root, so it points at the final path.
+                    sysrootTarget = concatPaths [ "/sysroot" targetDir ];
+                    sysrootTargetParent = builtins.dirOf sysrootTarget;
+                    sysrootMountPoint = concatPaths [ "/sysroot" dirPath ];
+                    sysrootParent = builtins.dirOf sysrootMountPoint;
+                  in
+                  {
+                    "persist-${escapeSystemdPath targetDir}" = {
+                      description = "Link ${targetDir} to ${dirPath}";
+                      wantedBy = [ "initrd.target" ];
+                      before = [ "initrd-nixos-activation.service" ];
+                      unitConfig = {
+                        DefaultDependencies = false;
+                        # Order after the persistent storage is mounted.
+                        RequiresMountsFor = [ sysrootTarget ];
+                      };
+                      # The initrd only ships systemd's own tools; pull in
+                      # coreutils for mkdir/ln. Using `script` (rather than an
+                      # external ExecStart) is what gets the generated script
+                      # copied into the initramfs.
+                      path = [ pkgs.coreutils ];
+                      serviceConfig = {
+                        Type = "oneshot";
+                        RemainAfterExit = true;
+                      };
+                      # Ownership is applied later, in the stage-2
+                      # `persist-directories` activation, once users exist; the
+                      # initrd only needs the directory to be present.
+                      # `mkdir --mode` and `-p` are split so we don't trip
+                      # shellcheck's SC2174 (mode only applies to the deepest
+                      # dir under -p), which is fatal under strict shell checks.
+                      script = ''
+                        if [ ! -d ${escapeShellArg sysrootTarget} ]; then
+                            mkdir -p ${escapeShellArg sysrootTargetParent}
+                            mkdir --mode=${escapeShellArg mode} ${escapeShellArg sysrootTarget}
+                        fi
+                        mkdir -p ${escapeShellArg sysrootParent}
+                        if [ ! -e ${escapeShellArg sysrootMountPoint} ]; then
+                            ln -s ${escapeShellArg targetDir} ${escapeShellArg sysrootMountPoint}
+                        fi
+                      '';
+                    };
+                  };
                 dirs = filter (d: elem d.dirPath pathsNeededForBoot) directories;
               in
-              map mkBindMount dirs;
-
-            systemd.mounts =
-              let
-                mkBindMount = { dirPath, persistentStoragePath, hideMount, allowTrash, ... }: {
-                  wantedBy = [ "local-fs.target" ];
-                  before = [ "local-fs.target" ];
-                  where = concatPaths [ "/" dirPath ];
-                  what = concatPaths [ persistentStoragePath dirPath ];
-                  unitConfig.DefaultDependencies = false;
-                  type = "none";
-                  options = concatStringsSep "," ([
-                    "bind"
-                  ] ++ optionals hideMount [
-                    "x-gvfs-hide"
-                  ] ++ optionals allowTrash [
-                    "x-gvfs-trash"
-                  ]);
-                };
-              in
-              map mkBindMount directories;
+              foldl' recursiveUpdate { } (map mkPersistDirInitrdService dirs);
 
             system.activationScripts =
               let
@@ -446,13 +543,19 @@ in
                     parentDirs = mkParentDirs explicitDirs;
 
                     # All directories in the order they should be created.
+                    # The explicitly listed `directories` are deliberately
+                    # left out: they become symlinks into persistent storage
+                    # rather than real directories in the ephemeral
+                    # filesystem, and are handled by `persist-directories`.
+                    # Their parents and the parent directories of files
+                    # (`fileDirs`) still need to be real directories, though.
                     allDirs =
                       persistentStorageDirParents
                       ++ persistentStorageDirs
                       ++ homeDirParents
                       ++ homeDirs
                       ++ parentDirs
-                      ++ explicitDirs;
+                      ++ fileDirs;
                   in
                   pkgs.writeShellScript "persistence-run-create-directories" ''
                     _status=0
@@ -468,14 +571,26 @@ in
                     ${concatMapStrings mkPersistFile files}
                     exit $_status
                   '';
+
+                persistDirScript =
+                  pkgs.writeShellScript "persistence-persist-directories" ''
+                    _status=0
+                    trap "_status=1" ERR
+                    ${concatMapStrings mkPersistDir directories}
+                    exit $_status
+                  '';
               in
               {
                 "createPersistentStorageDirs" = {
                   deps = [ "users" "groups" ];
                   text = "${dirCreationScript}";
                 };
-                "persist-files" = {
+                "persist-directories" = {
                   deps = [ "createPersistentStorageDirs" ];
+                  text = "${persistDirScript}";
+                };
+                "persist-files" = {
+                  deps = [ "createPersistentStorageDirs" "persist-directories" ];
                   text = "${persistFileScript}";
                 };
               };
@@ -483,17 +598,24 @@ in
             boot.initrd.postMountCommands =
               let
                 neededForBootDirs = filter (dir: elem dir.dirPath pathsNeededForBoot) directories;
-                mkBindMount = { persistentStoragePath, dirPath, ... }:
+                mkSymlink = { persistentStoragePath, dirPath, ... }:
                   let
+                    # In the stage-1 initrd the ephemeral root is mounted at
+                    # /mnt-root; the symlink target has to resolve after the
+                    # switch_root, so it points at the final path.
                     target = concatPaths [ "/mnt-root" persistentStoragePath dirPath ];
+                    mountPoint = concatPaths [ "/mnt-root" dirPath ];
                   in
                   ''
                     mkdir -p ${escapeShellArg target}
-                    mountFS ${escapeShellArgs [ target dirPath ]} bind none
+                    mkdir -p "$(dirname ${escapeShellArg mountPoint})"
+                    if [ ! -e ${escapeShellArg mountPoint} ]; then
+                        ln -s ${escapeShellArg (concatPaths [ persistentStoragePath dirPath ])} ${escapeShellArg mountPoint}
+                    fi
                   '';
               in
               mkIf (!config.boot.initrd.systemd.enable)
-                (mkAfter (concatMapStrings mkBindMount neededForBootDirs));
+                (mkAfter (concatMapStrings mkSymlink neededForBootDirs));
           }
 
           # Work around an issue with persisting /etc/machine-id where the
@@ -593,8 +715,10 @@ in
 
             warnings =
               let
-                usersWithoutUid = attrNames (filterAttrs (n: u: u.uid == null) config.users.users);
-                groupsWithoutGid = attrNames (filterAttrs (n: g: g.gid == null) config.users.groups);
+              shadowedDirs =
+                let raw = allPersistentStoragePaths.directories;
+                in filter (d: any (shadowedBy d.dirPath d) raw) raw;
+              usersWithoutUid = attrNames (filterAttrs (n: u: u.uid == null) config.users.users);                groupsWithoutGid = attrNames (filterAttrs (n: g: g.gid == null) config.users.groups);
                 varLibNixosPersistent =
                   let
                     varDirs = parentsOf "/var/lib/nixos" ++ [ "/var/lib/nixos" ];
@@ -607,6 +731,15 @@ in
               in
               mkIf (any id allPersistentStoragePaths.enableWarnings)
                 (mkMerge [
+                  (mkIf (shadowedDirs != [ ]) [
+                    ''
+                      environment.persistence:
+                          The following directories are nested inside another persisted
+                          directory and have been skipped; they are already persistent
+                          through their ancestor:
+                            ${concatStringsSep "\n      " (unique (catAttrs "dirPath" shadowedDirs))}
+                    ''
+                  ])
                   (mkIf (!varLibNixosPersistent && (usersWithoutUid != [ ] || groupsWithoutGid != [ ])) [
                     ''
                       environment.persistence:

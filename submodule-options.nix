@@ -125,12 +125,20 @@ let
           dirOpts.options;
       method = mkOption {
         type = enum [ "auto" "symlink" ];
-        default = "auto";
+        default = "symlink";
         description = ''
           The method used to link to the target file.
-          `auto' will almost always do the right thing,
-          thus you should only set this if the default
-          doesn't work.
+          `symlink', the default, points a symlink at the
+          file in persistent storage. This avoids the
+          cross-device copies a bind mount forces when a
+          program renames a file into place. `auto' bind
+          mounts the file when it already exists in
+          persistent storage and symlinks it otherwise;
+          only use it if `symlink' gives you issues.
+
+          Note that `/etc/machine-id' is always bind
+          mounted regardless of this setting, as symlinking
+          it breaks systemd-machine-id-commit.
         '';
       };
       filePath = mkOption {
@@ -155,6 +163,11 @@ let
         description = ''
           Whether to hide bind mounts from showing up as
           mounted drives.
+
+          Has no effect now that directories are symlinked
+          rather than bind mounted; symlinks don't show up
+          as mounted drives to begin with. Kept for
+          backwards compatibility.
         '';
       };
       allowTrash = mkOption {
@@ -164,6 +177,12 @@ let
         example = true;
         description = ''
           Whether to allow newer GIO-based applications to trash files.
+
+          Has no effect now that directories are symlinked
+          rather than bind mounted; a symlinked directory
+          shares a filesystem with its trash location, so
+          trashing already works. Kept for backwards
+          compatibility.
         '';
       };
       # Save the default permissions at the level the
@@ -208,7 +227,7 @@ let
           [ "method" ]
           ''
             ▹ persistence."${name}":
-                As real bind mounts are now used instead of bindfs, changing the directory linking
+                As symlinks are now always used for directories, changing the directory linking
                 method is deprecated.
           '')
       ];
@@ -231,7 +250,7 @@ in
       [ "allowOther" ]
       ''
         ▹ persistence."${name}":
-            As real bind mounts are now used instead of bindfs, `allowOther' is no longer needed.
+            As symlinks are now used instead of bindfs, `allowOther' is no longer needed.
       '')
     (mkRemovedOptionModule
       [ "removePrefixDirectory" ]
@@ -244,7 +263,7 @@ in
       [ "defaultDirectoryMethod" ]
       ''
         ▹ persistence."${name}":
-            As real bind mounts are now used instead of bindfs, changing the default directory linking
+            As symlinks are now always used for directories, changing the default directory linking
             method is deprecated.
       '')
   ] ++ (optionals usersOpts [
@@ -280,7 +299,7 @@ in
           "/etc/NetworkManager/system-connections"
         ];
         description = ''
-          Directories to bind mount to persistent storage.
+          Directories to symlink to persistent storage.
         '';
       };
 
@@ -314,6 +333,9 @@ in
           example = true;
           description = ''
             Whether to hide bind mounts from showing up as mounted drives.
+
+            Has no effect now that directories are symlinked rather than
+            bind mounted. Kept for backwards compatibility.
           '';
         };
 
@@ -323,6 +345,9 @@ in
           example = true;
           description = ''
             Whether to allow newer GIO-based applications to trash files.
+
+            Has no effect now that directories are symlinked rather than
+            bind mounted. Kept for backwards compatibility.
           '';
         };
 
