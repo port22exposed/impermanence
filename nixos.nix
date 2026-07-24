@@ -295,6 +295,7 @@ in
                       description = "Bind mount or link ${targetFile} to ${mountPoint}";
                       wantedBy = [ "local-fs.target" ];
                       before = [ "local-fs.target" ];
+                      after = [ "systemd-sysusers.service" ];
                       path = [ pkgs.util-linux ];
                       unitConfig.DefaultDependencies = false;
                       restartIfChanged = false;
@@ -325,6 +326,7 @@ in
                       description = "Link ${targetDir} to ${mountPoint}";
                       wantedBy = [ "local-fs.target" ];
                       before = [ "local-fs.target" ];
+                      after = [ "systemd-sysusers.service" ];
                       path = [ pkgs.util-linux ];
                       unitConfig.DefaultDependencies = false;
                       restartIfChanged = false;

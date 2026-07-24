@@ -93,6 +93,6 @@ else
     ln -sf "$target" "$mountPoint"
 fi
 
-if [[ -L $mountPoint ]]; then
+if [[ -L $mountPoint ]] && id -u "$user" &>/dev/null; then
     chown -h "$user:$group" "$mountPoint"
 fi
